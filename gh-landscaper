@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+
+import subprocess
+import json
+import datetime
+import sys
+import argparse
+import os
+
+# Configuration
+# List of branches that should never be considered for deletion to prevent accidents.
+PROTECTED_BRANCHES = {'main', 'master', 'dev', 'staging'}
+
+# Colors
+class Colors:
+    """
+    ANSI escape codes for terminal coloring.
+    Used to format output for better readability.
+    """
+    HEADER = '\033[95m'
+    OKBLUE = '\033[94m'
+    OKCYAN = '\033[96m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+
+def run_command(command, check=True, capture_output=True, text=True):
+    """
+    Executes a shell command using subprocess.run.
+
+    Args:
+        command (list): The command to run as a list of strings.
+        check (bool): If True, raises CalledProcessError if the command fails.
+        capture_output (bool): If True, captures stdout and stderr.
+        text (bool): If True, returns output as string instead of bytes.
+
+    Returns:
+        str: The stripped stdout of the command.
+
+    Raises:
+        subprocess.CalledProcessError: If the command fails and check=True.
+    """
+    try:
+        result = subprocess.run(
+            command,
+            check=check,
+            capture_output=capture_output,
+            text=text,
+            shell=True if os.name == 'nt' else False 
+        )
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"{Colors.FAIL}Error running command: {' '.join(command)}{Colors.ENDC}")
+        print(f"{Colors.FAIL}{e.stderr}{Colors.ENDC}")
+        sys.exit(1)
+
+def get_current_repo_info():
+    """
+    Retrieves the current repository's owner and name using the GitHub CLI.
+
+    Returns:
+        dict: A dictionary containing 'owner' and 'name' keys.
+    """
+    output = run_command(['gh', 'repo', 'view', '--json', 'owner,name'])
+    return json.loads(output)
+
+def get_local_branches():
+    """
+    Retrieves a set of all local git branch names.
+
+    Returns:
+        set: A set of strings representing local branch names.
+    """
+    output = run_command(['git', 'for-each-ref', '--format=%(refname:short)', 'refs/heads/'])
+    return set(output.splitlines())
+
+def get_merged_prs_branches(owner, repo, days, author=None):
+    """
+    Identifies branches associated with Pull Requests merged within a specified number of days.
+    Also filters by author if provided.
+
+    Args:
+        owner (str): The repository owner.
+        repo (str): The repository name.
+        days (int): Valid timeline in days to checking for merged PRs.
+        author (str, optional): GitHub username to filter PRs by.
+
+    Returns:
+        set: A set of branch names corresponding to merged PRs.
+    """
+    print(f"Checking for merged PRs (last {days} days)...")
+    
+    cmd = [
+        'gh', 'api', 
+        f'repos/{owner}/{repo}/pulls?state=closed&per_page=100' 
+    ]
+    
+    output = run_command(cmd)
+    prs = json.loads(output)
+    
+    merged_branches = set()
+    limit_date = datetime.datetime.now() - datetime.timedelta(days=days)
+    
+    for pr in prs:
+        # Check if PR is actually merged (merged_at is not null)
+        if pr.get('merged_at'):
+            merged_at = datetime.datetime.strptime(pr['merged_at'], "%Y-%m-%dT%H:%M:%SZ")
+            if merged_at > limit_date:
+                # Check Author if specified
+                if author:
+                    pr_author = pr['user']['login']
+                    if pr_author.lower() != author.lower():
+                        continue
+
+                # The branch name is in pr['head']['ref']
+                branch_name = pr['head']['ref']
+                merged_branches.add(branch_name)
+    
+    return merged_branches
+
+def get_stale_branches(days, author=None):
+    """
+    Identifies local branches that have had no commits for a specified number of days.
+    Also filters by commit author if provided.
+
+    Args:
+        days (int): The number of days of inactivity to consider a branch stale.
+        author (str, optional): The author name (substring match) to filter by.
+
+    Returns:
+        set: A set of stale branch names.
+    """
+    print(f"Checking for stale branches (no commits > {days} days)...")
+    
+    # We fetch refname, committerdate (unix timestamp), and authorname
+    output = run_command(['git', 'for-each-ref', '--format=%(refname:short)|%(committerdate:unix)|%(authorname)', 'refs/heads/'])
+    
+    stale_branches = set()
+    current_ts = datetime.datetime.now().timestamp()
+    days_seconds = days * 24 * 60 * 60
+    
+    for line in output.splitlines():
+        if not line: continue
+        parts = line.split('|')
+        if len(parts) != 3: continue
+        
+        branch, timestamp, branch_author = parts
+        try:
+            ts = float(timestamp)
+            # Check if the branch is older than the limit
+            if (current_ts - ts) > days_seconds:
+                # Check Author if specified
+                if author:
+                    # Case-insensitive substring match for author name
+                    if author.lower() not in branch_author.lower():
+                        continue
+                
+                stale_branches.add(branch)
+        except ValueError:
+            continue
+            
+    return stale_branches
+
+def delete_branches(branches, confirm):
+    """
+    Deletes the specified branches. Performs a dry run by default unless confirm is True.
+
+    Args:
+        branches (list): List of branch names to delete.
+        confirm (bool): If True, performs actual deletion. If False, just lists them.
+    """
+    if not branches:
+        print(f"{Colors.OKGREEN}No branches to clean up!{Colors.ENDC}")
+        return
+
+    print(f"\n{Colors.HEADER}Branches to be deleted:{Colors.ENDC}")
+    for branch in branches:
+        print(f"  {Colors.FAIL}- {branch}{Colors.ENDC}")
+    
+    if confirm:
+        print(f"\n{Colors.WARNING}Deleting branches...{Colors.ENDC}")
+        for branch in branches:
+            try:
+                # Use `git branch -d` which is safe delete. 
+                # It prevents deleting unmerged branches unless fully merged upstream.
+                subprocess.run(['git', 'branch', '-d', branch], check=True, text=True)
+                print(f"{Colors.OKGREEN}Deleted {branch}{Colors.ENDC}")
+            except subprocess.CalledProcessError:
+                print(f"{Colors.FAIL}Failed to delete {branch} (might not be fully merged locally or other error){Colors.ENDC}")
+    else:
+        print(f"\n{Colors.OKBLUE}Dry run complete. Use --confirm to actually delete.{Colors.ENDC}")
+
+def main():
+    """
+    Main entry point of the script. 
+    Parses arguments, gathers branch info, and invokes deletion logic.
+    """
+    parser = argparse.ArgumentParser(description="gh-landscaper: GitHub CLI extension to clean up stale and merged branches.")
+    parser.add_argument("--confirm", action="store_true", help="Actually delete the branches. Defaults to dry-run.")
+    parser.add_argument("--merged-days", type=int, default=60, help="Days to check for merged PRs (default: 60)")
+    parser.add_argument("--stale-days", type=int, default=30, help="Days to check for stale branches (default: 30)")
+    parser.add_argument("--author", type=str, help="Filter by author (GitHub username for PRs, Git author name for stale branches)")
+    
+    args = parser.parse_args()
+
+    print(f"{Colors.HEADER}Genering report...{Colors.ENDC}")
+
+    # Check dependencies (gh and git must be available)
+    try:
+        subprocess.run(['gh', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(['git', '--version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+    except FileNotFoundError:
+        print(f"{Colors.FAIL}Error: 'gh' and 'git' must be installed and in your PATH.{Colors.ENDC}")
+        sys.exit(1)
+
+    try:
+        repo_info = get_current_repo_info()
+        print(f"Repository: {Colors.OKCYAN}{repo_info['owner']}/{repo_info['name']}{Colors.ENDC}")
+    except Exception:
+        print(f"{Colors.FAIL}Could not determine repository info. Are you in a git repo?{Colors.ENDC}")
+        sys.exit(1)
+
+    local_branches = get_local_branches()
+    
+    merged_branches = get_merged_prs_branches(repo_info['owner'], repo_info['name'], args.merged_days, args.author)
+    stale_branches = get_stale_branches(args.stale_days, args.author)
+    
+    # Candidates for deletion = (merged OR stale) AND local
+    candidates = (merged_branches | stale_branches) & local_branches
+    
+    # Filter protected branches
+    final_candidates = {b for b in candidates if b not in PROTECTED_BRANCHES}
+    
+    # Summary of findings
+    print(f"\nFound {len(local_branches)} local branches.")
+    print(f"Found {len(candidates)} candidates for cleanup (merged or stale).")
+    if args.author:
+        print(f"Filtered by author: {args.author}")
+    print(f"Ignoring protected branches: {', '.join(PROTECTED_BRANCHES)}")
+    
+    delete_branches(sorted(list(final_candidates)), args.confirm)
+
+if __name__ == "__main__":
+    main()
