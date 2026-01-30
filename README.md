@@ -20,7 +20,7 @@ A GitHub CLI extension to clean up stale and merged branches.
 ## Installation
 
 ```bash
-gh extension install mpran/gh-landscaper
+gh extension install PRANAVMAHALINGAM/gh-landscaper
 ```
 *(Replace `mpran` with your actual GitHub username if different)*
 
