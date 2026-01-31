@@ -90,7 +90,7 @@ def get_merged_prs_branches(owner, repo, days, author=None):
         author (str, optional): GitHub username to filter PRs by.
 
     Returns:
-        set: A set of branch names corresponding to merged PRs.
+        dict: A dict of branch names corresponding to merged PRs mapped to author.
     """
     print(f"Checking for merged PRs (last {days} days)...")
     
@@ -102,7 +102,7 @@ def get_merged_prs_branches(owner, repo, days, author=None):
     output = run_command(cmd)
     prs = json.loads(output)
     
-    merged_branches = set()
+    merged_branches = {}
     limit_date = datetime.datetime.now() - datetime.timedelta(days=days)
     
     for pr in prs:
@@ -110,15 +110,15 @@ def get_merged_prs_branches(owner, repo, days, author=None):
         if pr.get('merged_at'):
             merged_at = datetime.datetime.strptime(pr['merged_at'], "%Y-%m-%dT%H:%M:%SZ")
             if merged_at > limit_date:
+                pr_author = pr['user']['login']
                 # Check Author if specified
                 if author:
-                    pr_author = pr['user']['login']
                     if pr_author.lower() != author.lower():
                         continue
 
                 # The branch name is in pr['head']['ref']
                 branch_name = pr['head']['ref']
-                merged_branches.add(branch_name)
+                merged_branches[branch_name] = pr_author
     
     return merged_branches
 
@@ -132,14 +132,14 @@ def get_stale_branches(days, author=None):
         author (str, optional): The author name (substring match) to filter by.
 
     Returns:
-        set: A set of stale branch names.
+        dict: A dict of stale branch names mapped to last committer.
     """
     print(f"Checking for stale branches (no commits > {days} days)...")
     
     # We fetch refname, committerdate (unix timestamp), and authorname
     output = run_command(['git', 'for-each-ref', '--format=%(refname:short)|%(committerdate:unix)|%(authorname)', 'refs/heads/'])
     
-    stale_branches = set()
+    stale_branches = {}
     current_ts = datetime.datetime.now().timestamp()
     days_seconds = days * 24 * 60 * 60
     
@@ -159,35 +159,35 @@ def get_stale_branches(days, author=None):
                     if author.lower() not in branch_author.lower():
                         continue
                 
-                stale_branches.add(branch)
+                stale_branches[branch] = branch_author
         except ValueError:
             continue
             
     return stale_branches
 
-def delete_branches(branches, confirm):
+def delete_branches(branches_info, confirm):
     """
     Deletes the specified branches. Performs a dry run by default unless confirm is True.
 
     Args:
-        branches (list): List of branch names to delete.
+        branches_info (list): List of tuples (branch_name, details_string).
         confirm (bool): If True, performs actual deletion. If False, just lists them.
     """
-    if not branches:
+    if not branches_info:
         print(f"{Colors.OKGREEN}No branches to clean up!{Colors.ENDC}")
         return
 
     print(f"\n{Colors.HEADER}Branches to be deleted:{Colors.ENDC}")
-    for branch in branches:
-        print(f"  {Colors.FAIL}- {branch}{Colors.ENDC}")
+    for branch, details in branches_info:
+        print(f"  {Colors.FAIL}- {branch} {Colors.OKBLUE}({details}){Colors.ENDC}")
     
     if confirm:
         print(f"\n{Colors.WARNING}Deleting branches...{Colors.ENDC}")
-        for branch in branches:
+        for branch, _ in branches_info:
             try:
                 # Use `git branch -d` which is safe delete. 
                 # It prevents deleting unmerged branches unless fully merged upstream.
-                subprocess.run(['git', 'branch', '-d', branch], check=True, text=True)
+                subprocess.run(['git', 'branch', '-d', branch], check=True, text=True, encoding='utf-8')
                 print(f"{Colors.OKGREEN}Deleted {branch}{Colors.ENDC}")
             except subprocess.CalledProcessError:
                 print(f"{Colors.FAIL}Failed to delete {branch} (might not be fully merged locally or other error){Colors.ENDC}")
@@ -230,19 +230,34 @@ def main():
     stale_branches = get_stale_branches(args.stale_days, args.author)
     
     # Candidates for deletion = (merged OR stale) AND local
-    candidates = (merged_branches | stale_branches) & local_branches
+    candidate_names = (merged_branches.keys() | stale_branches.keys()) & local_branches
     
     # Filter protected branches
-    final_candidates = {b for b in candidates if b not in PROTECTED_BRANCHES}
+    final_candidate_names = {b for b in candidate_names if b not in PROTECTED_BRANCHES}
     
     # Summary of findings
     print(f"\nFound {len(local_branches)} local branches.")
-    print(f"Found {len(candidates)} candidates for cleanup (merged or stale).")
+    print(f"Found {len(final_candidate_names)} candidates for cleanup (merged or stale).")
     if args.author:
         print(f"Filtered by author: {args.author}")
     print(f"Ignoring protected branches: {', '.join(PROTECTED_BRANCHES)}")
     
-    delete_branches(sorted(list(final_candidates)), args.confirm)
+    final_branches_info = []
+    for branch in sorted(list(final_candidate_names)):
+        reasons = []
+        author_info = "Unknown"
+        
+        if branch in merged_branches:
+            reasons.append("Merged")
+            author_info = merged_branches[branch]
+        if branch in stale_branches:
+            reasons.append("Stale")
+            author_info = stale_branches[branch] # Stale author overrides merged author if both exist (usually same)
+            
+        details = f"{', '.join(reasons)} - Author: {author_info}"
+        final_branches_info.append((branch, details))
+    
+    delete_branches(final_branches_info, args.confirm)
 
 if __name__ == "__main__":
     main()
