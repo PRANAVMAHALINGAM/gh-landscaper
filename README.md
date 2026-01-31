@@ -22,7 +22,11 @@ A GitHub CLI extension to clean up stale and merged branches.
 ```bash
 gh extension install PRANAVMAHALINGAM/gh-landscaper
 ```
-*(Replace `mpran` with your actual GitHub username if different)*
+
+> **Note for Mac/Linux Users:** If you encounter a `permission denied` error, you may need to grant execution permissions to the script manually:
+> ```bash
+> chmod +x "${XDG_DATA_HOME:-$HOME/.local/share}/gh/extensions/gh-landscaper/gh-landscaper"
+> ```
 
 ## Usage Reference
 
