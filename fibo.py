@@ -5,3 +5,8 @@ def fibo(n) :
 
 for i in range(5) :
     print(fibo(i))
+
+def hello(name) :
+    print("Hello", name)
+    
+print(hello("Shruti"))   
