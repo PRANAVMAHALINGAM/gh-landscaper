@@ -1,4 +1,4 @@
-# gh-landscaper
+# gh-landscaper-fix
 
 A GitHub CLI extension to clean up stale and merged branches.
 
