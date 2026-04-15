@@ -7,6 +7,6 @@ for i in range(5) :
     print(fibo(i))
 
 def hello(name) :
-    print("Hello", name)
+    print("Hello ffff", name)
     
 print(hello("Shruti"))   
